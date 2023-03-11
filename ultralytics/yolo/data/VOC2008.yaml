@@ -1,0 +1,8 @@
+train: /home/imu_maming/ddn/ZXJ/datasets/VOC2008/dataSet_path/train.txt
+val: /home/imu_maming/ddn/ZXJ/datasets/VOC2008/dataSet_path/val.txt
+
+#number of classes
+nc: 6
+
+#class names
+names: ["closeeye","face","head","phone","smoke","yawn"]
