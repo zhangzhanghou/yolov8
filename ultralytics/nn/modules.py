@@ -12,8 +12,8 @@ from ultralytics.yolo.utils.tal import dist2bbox, make_anchors
 
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
-    # Pad to 'same' shape outputs
-    if d > 1:
+    # Pad to 'same' shape outputs  返回pad的大小，使得padding后输出张量的大小不变。
+    if d > 1:# 扩张卷积
         k = d * (k - 1) + 1 if isinstance(k, int) else [d * (x - 1) + 1 for x in k]  # actual kernel-size
     if p is None:
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
@@ -27,14 +27,15 @@ class Conv(nn.Module):
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
         super().__init__()
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
-        self.bn = nn.BatchNorm2d(c2)
+        self.bn = nn.BatchNorm2d(c2)# 使得每一个batch的特征图均满足均值为0，方差为1的分布规律
+        # 如果act=True 则采用默认的激活函数SiLU；如果act的类型是nn.Module，则采用传入的act; 否则不采取任何动作 （nn.Identity函数相当于f(x)=x，只用做占位，返回原始的输入）。
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
+        return self.act(self.bn(self.conv(x))) # 采用BatchNorm
 
-    def forward_fuse(self, x):
-        return self.act(self.conv(x))
+    def forward_fuse(self, x):#  用于Model类的fuse函数融合 Conv + BN 加速推理，一般用于测试/验证阶段
+        return self.act(self.conv(x)) # 不采用BatchNorm
 
 
 class DWConv(Conv):
@@ -83,7 +84,7 @@ class DFL(nn.Module):
 
 class TransformerLayer(nn.Module):
     # Transformer layer https://arxiv.org/abs/2010.11929 (LayerNorm layers removed for better performance)
-    def __init__(self, c, num_heads):
+    def __init__(self, c, num_heads): # c: 词特征向量的大小  num_heads 检测头的个数。
         super().__init__()
         self.q = nn.Linear(c, c, bias=False)
         self.k = nn.Linear(c, c, bias=False)
@@ -93,8 +94,9 @@ class TransformerLayer(nn.Module):
         self.fc2 = nn.Linear(c, c, bias=False)
 
     def forward(self, x):
-        x = self.ma(self.q(x), self.k(x), self.v(x))[0] + x
-        x = self.fc2(self.fc1(x)) + x
+        # x:(s,n,c) batch size,源序列长度,embed_dim
+        x = self.ma(self.q(x), self.k(x), self.v(x))[0] + x # 多头注意力机制+残差连接
+        x = self.fc2(self.fc1(x)) + x  # 两个全连接层+ 残差连接
         return x
 
 
@@ -110,15 +112,17 @@ class TransformerBlock(nn.Module):
         self.c2 = c2
 
     def forward(self, x):
+        # x:[batch, channel, height, width] -> [height × width, batch, channel]
         if self.conv is not None:
             x = self.conv(x)
-        b, _, w, h = x.shape
-        p = x.flatten(2).permute(2, 0, 1)
+        b, _, w, h = x.shape # x:(b,c2,w,h)
+        p = x.flatten(2).permute(2, 0, 1) # flatten后:(b,c2,w*h)  p: (w*h,b,c2)
+        # linear后: (w*h,b,c2)   tr后: (w*h,b,c2)   permute后: (b,c2,w*h)  reshape后：(b,c2,w,h)
         return self.tr(p + self.linear(p)).permute(1, 2, 0).reshape(b, self.c2, w, h)
 
 
 class Bottleneck(nn.Module):
-    # Standard bottleneck
+    # Standard bottleneck 先使用 3x3 卷积降维，剔除冗余信息；再使用 3×3 卷积升维。
     def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):  # ch_in, ch_out, shortcut, groups, kernels, expand
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
@@ -458,3 +462,28 @@ class Classify(nn.Module):
             x = torch.cat(x, 1)
         x = self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
         return x if self.training else x.softmax(1)
+
+
+# 改进一
+
+class SPPFCSPC(nn.Module):
+
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, k=5):
+        super(SPPFCSPC, self).__init__()
+        c_ = int(2 * c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(c_, c_, 3, 1)
+        self.cv4 = Conv(c_, c_, 1, 1)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        self.cv5 = Conv(4 * c_, c_, 1, 1)
+        self.cv6 = Conv(c_, c_, 3, 1)
+        self.cv7 = Conv(2 * c_, c2, 1, 1)
+
+    def forward(self, x):
+        x1 = self.cv4(self.cv3(self.cv1(x)))
+        x2 = self.m(x1)
+        x3 = self.m(x2)
+        y1 = self.cv6(self.cv5(torch.cat((x1,x2,x3, self.m(x3)),1)))
+        y2 = self.cv2(x)
+        return self.cv7(torch.cat((y1, y2), dim=1))
