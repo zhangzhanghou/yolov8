@@ -487,3 +487,150 @@ class SPPFCSPC(nn.Module):
         y1 = self.cv6(self.cv5(torch.cat((x1,x2,x3, self.m(x3)),1)))
         y2 = self.cv2(x)
         return self.cv7(torch.cat((y1, y2), dim=1))
+
+# 改进二
+#RFA exp start********************************
+class h_sigmoid(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_sigmoid, self).__init__()
+        self.relu = nn.ReLU6(inplace=inplace)
+
+    def forward(self, x):
+        return self.relu(x + 3) / 6
+
+class h_swish(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_swish, self).__init__()
+        self.sigmoid = h_sigmoid(inplace=inplace)
+
+    def forward(self, x):
+        return x * self.sigmoid(x)
+
+class CAConv(nn.Module):
+    def __init__(self, inp, oup, kernel_size, stride, reduction=32):
+        super(CAConv, self).__init__()
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        mip = max(8, inp // reduction)
+
+        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = h_swish()
+
+        self.conv_h = nn.Conv2d(mip, inp, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, inp, kernel_size=1, stride=1, padding=0)
+        self.conv = nn.Sequential(nn.Conv2d(inp, oup, kernel_size, padding=kernel_size // 2, stride=stride),
+                                  nn.BatchNorm2d(oup),
+                                  nn.ReLU())
+
+    def forward(self, x):
+        identity = x
+
+        n, c, h, w = x.size()
+        x_h = self.pool_h(x)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)
+
+        y = torch.cat([x_h, x_w], dim=2)
+        y = self.conv1(y)
+        y = self.bn1(y)
+        y = self.act(y)
+
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        a_h = self.conv_h(x_h).sigmoid()
+        a_w = self.conv_w(x_w).sigmoid()
+
+        out = identity * a_w * a_h
+
+        return self.conv(out)
+
+class RFCAConv(nn.Module):
+    def __init__(self, c1, c2, kernel_size, stride):
+        super(RFCAConv, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.group_conv1 = Conv(c1, 3 *c1, k=1, g=c1)
+        self.group_conv2 = Conv(c1, 3 *c1, k=3, g=c1)
+        self.group_conv3 = Conv(c1, 3 *c1, k=5, g=c1)
+
+        self.softmax = nn.Softmax(dim=1)
+
+        self.group_conv = Conv(c1, 3 * c1, k=3, g=c1)
+        self.convDown = Conv(c1, c1, k=3, s=3,g=c1)
+        self.CA = CAConv(c1, c2, kernel_size, stride)
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x)
+
+        group1 = self.softmax(self.group_conv1(y))
+        group2 = self.softmax(self.group_conv2(y))
+        group3 = self.softmax(self.group_conv3(y))
+        # g1 =  torch.cat([group1, group2, group3], dim=1)
+
+        g1 = self.group_conv(x)
+        # g2 = self.group_conv(x)
+        # g3 = self.group_conv(x)
+
+        out1 = g1 * group1
+        out2 = g1 * group2
+        out3 = g1 * group3
+
+        out =torch.cat([out1, out2, out3],dim=1)
+        # 获取输入特征图的形状
+        batch_size, channels, height, width = out.shape
+
+        # 计算输出特征图的通道数
+        output_channels = c
+
+        # 重塑并转置特征图以将通道数分成3x3个子通道并扩展高度和宽度
+        out = out.view(batch_size, output_channels, 3, 3, height, width).permute(0, 1, 4, 2, 5, 3).\
+                                                reshape(batch_size, output_channels, 3 * height, 3 * width)
+        # out = out.view(batch_size, output_channels, height*3, width*3)
+        out = self.convDown(out)
+        out = self.CA(out)
+        return out
+
+
+
+
+def get_dwconv(dim, kernel, bias):
+    return DepthWiseConv2dImplicitGEMM(dim, kernel, bias)
+class gnconv(nn.Module):
+    def __init__(self, dim, order=5, gflayer=None, h=14, w=8, s=1.0):
+        super().__init__()
+        self.order = order
+        self.dims = [dim // 2 ** i for i in range(order)]
+        self.dims.reverse()
+        self.proj_in = nn.Conv2d(dim, 2 * dim, 1)
+
+        if gflayer is None:
+            self.dwconv = get_dwconv(sum(self.dims), 7, True)
+        else:
+            self.dwconv = gflayer(sum(self.dims), h=h, w=w)
+
+        self.proj_out = nn.Conv2d(dim, dim, 1)
+
+        self.pws = nn.ModuleList(
+            [nn.Conv2d(self.dims[i], self.dims[i + 1], 1) for i in range(order - 1)]
+        )
+
+        self.scale = s
+
+        print('[gconv]', order, 'order with dims=', self.dims, 'scale=%.4f' % self.scale)
+
+    def get_dwconv(dim, kernel, bias):
+        return DepthWiseConv2dImplicitGEMM(dim, kernel, bias)
+    def forward(self, x, mask=None, dummy=False):
+        B, C, H, W = x.shape
+        fused_x = self.proj_in(x)
+        pwa, abc = torch.split(fused_x, (self.dims[0], sum(self.dims)), dim=1)
+        dw_abc = self.dwconv(abc) * self.scale
+        dw_list = torch.split(dw_abc, self.dims, dim=1)
+        x = pwa * dw_list[0]
+        for i in range(self.order - 1):
+            x = self.pws[i](x) * dw_list[i + 1]
+        x = self.proj_out(x)
+        return x
+
+
