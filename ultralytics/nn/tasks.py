@@ -10,7 +10,7 @@ import torch.nn as nn
 from ultralytics.nn.modules import (C1, C2, C3, C3TR, SPP, SPPF, SPPFCSPC, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x,
                                     Classify,
                                     Concat, Conv, ConvTranspose, Detect, DWConv, DWConvTranspose2d, Ensemble, Focus,
-                                    GhostBottleneck, GhostConv, Segment, RFCAConv, CAConv)
+                                    GhostBottleneck, GhostConv, Segment, RFCAConv, CAConv, gnconv, HorBlock)
 from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, yaml_load
 from ultralytics.yolo.utils.checks import check_requirements, check_yaml
 from ultralytics.yolo.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights,
@@ -432,14 +432,23 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
         n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
-                Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF,SPPFCSPC, DWConv, Focus,
-                BottleneckCSP, C1, C2, C2f, C3,RFCAConv,CAConv, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x}:
+                Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus,
+                BottleneckCSP, C1, C2, C2f, C3,RFCAConv,CAConv, gnconv,HorBlock,C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x}:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(c2 * gw, 8)
 
             args = [c1, c2, *args[1:]]
-            if m in {BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x}:
+            if m in {BottleneckCSP, C1, C2, C2f, C3, gnconv,HorBlock, C3TR, C3Ghost, C3x}:
+                args.insert(2, n)  # number of repeats
+                n = 1
+        # add module research
+        elif m in [SPPFCSPC, HorBlock]:
+            c1, c2 = ch[f], args[0]
+            if c2 != nc:  # if not output
+                c2 = make_divisible(c2 * gw, 8)
+            args = [c1, c2, *args[1:]]
+            if m in [HorBlock]:
                 args.insert(2, n)  # number of repeats
                 n = 1
         elif m is nn.BatchNorm2d:
