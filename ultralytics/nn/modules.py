@@ -7,7 +7,6 @@ import math
 
 import torch
 import torch.nn.functional as F
-from timm.models.layers import DropPath
 import torch.nn as nn
 
 from ultralytics.yolo.utils.tal import dist2bbox, make_anchors
@@ -194,6 +193,7 @@ class C2f(nn.Module):
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
 
     def forward(self, x):
+
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
@@ -594,35 +594,27 @@ class RFCAConv(nn.Module):
         return out
 
 
-
-
-def get_dwconv(dim, kernel, bias):
-    return nn.Conv2d(dim, dim, kernel_size=kernel, padding=(kernel-1)//2 ,bias=bias, groups=dim)
 class gnconv(nn.Module):
     def __init__(self, dim, order=5, gflayer=None, h=14, w=8, s=1.0):
         super().__init__()
         self.order = order
         self.dims = [dim // 2 ** i for i in range(order)]
         self.dims.reverse()
-        self.proj_in = nn.Conv2d(dim, 2 * dim, 1)
+        self.proj_in = Conv(dim, 2 * dim, 1)
 
         if gflayer is None:
             self.dwconv = get_dwconv(sum(self.dims), 7, True)
         else:
             self.dwconv = gflayer(sum(self.dims), h=h, w=w)
 
-        self.proj_out = nn.Conv2d(dim, dim, 1)
-
+        self.proj_out = Conv(dim, dim, 1)
         self.pws = nn.ModuleList(
-            [nn.Conv2d(self.dims[i], self.dims[i + 1], 1) for i in range(order - 1)]
+            [Conv(self.dims[i], self.dims[i + 1], 1) for i in range(order - 1)]
         )
-
         self.scale = s
 
-        print('[gconv]', order, 'order with dims=', self.dims, 'scale=%.4f' % self.scale)
-
     def forward(self, x, mask=None, dummy=False):
-        # B, C, H, W = x.shape
+        # B, C, H, W = x.shape gnconv [512]by iscyy/air
         fused_x = self.proj_in(x)
         pwa, abc = torch.split(fused_x, (self.dims[0], sum(self.dims)), dim=1)
         dw_abc = self.dwconv(abc) * self.scale
@@ -631,8 +623,8 @@ class gnconv(nn.Module):
         for i in range(self.order - 1):
             x = self.pws[i](x) * dw_list[i + 1]
         x = self.proj_out(x)
-        return x
 
+        return x
 
 
 class HorLayerNorm(nn.Module):
@@ -663,6 +655,9 @@ class HorLayerNorm(nn.Module):
             return x
 
 
+def get_dwconv(dim, kernel, bias):
+    return nn.Conv2d(dim, dim, kernel_size=kernel, padding=(kernel - 1) // 2, bias=bias, groups=dim)
+
 class HorBlock(nn.Module):
     r""" HorNet block
     """
@@ -684,12 +679,14 @@ class HorBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
+        print("HorBlock input 1",x)
         B, C, H, W  = x.shape # [512]
         if self.gamma1 is not None:
             gamma1 = self.gamma1.view(C, 1, 1)
         else:
             gamma1 = 1
         x = x + self.drop_path(gamma1 * self.gnconv(self.norm1(x)))
+        print("HorBlock input 2", x)
 
         input = x
         x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
@@ -702,4 +699,56 @@ class HorBlock(nn.Module):
         x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
 
         x = input + self.drop_path(x)
+        print("HorBlock output", x)
         return x
+
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
+    """
+    def __init__(self, drop_prob=None):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        return drop_path_f(x, self.drop_prob, self.training)
+
+def drop_path_f(x, drop_prob: float = 0., training: bool = False):
+    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
+    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
+    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
+    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
+    'survival rate' as the argument.
+    """
+    if drop_prob == 0. or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    random_tensor.floor_()  # binarize
+    output = x.div(keep_prob) * random_tensor
+    return output
+
+
+'''
+SimAM
+'''
+class SimAM(torch.nn.Module):
+    def __init__(self, channels=None, e_lambda=1e-4):
+        super(SimAM, self).__init__()
+
+        self.activaton = nn.Sigmoid()
+        self.e_lambda = e_lambda
+    def __repr__(self):
+        s = self.__class__.__name__ + '('
+        s += ('lambda=%f)' % self.e_lambda)
+        return s
+    @staticmethod
+    def get_module_name():
+        return "simam"
+    def forward(self, x):
+        b, c, h, w = x.size()
+        n = w * h - 1
+        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
+        return x * self.activaton(y)

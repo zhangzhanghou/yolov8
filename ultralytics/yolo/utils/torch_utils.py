@@ -27,7 +27,7 @@ WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 TORCH_1_9 = check_version(torch.__version__, '1.9.0')
 TORCH_1_11 = check_version(torch.__version__, '1.11.0')
 TORCH_1_12 = check_version(torch.__version__, '1.12.0')
-
+TORCH_2_0 = check_version(torch.__version__, minimum='2.0')
 
 @contextmanager
 def torch_distributed_zero_first(local_rank: int):
@@ -276,6 +276,8 @@ def init_seeds(seed=0, deterministic=False):
         torch.backends.cudnn.deterministic = True
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         os.environ['PYTHONHASHSEED'] = str(seed)
+
+
 
 
 class ModelEMA:

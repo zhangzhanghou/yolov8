@@ -11,6 +11,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from random import random
 
 import numpy as np
 import torch
@@ -72,10 +73,11 @@ class BaseTrainer:
         csv (Path): Path to results CSV file.
     """
 
+
+
     def __init__(self, cfg=DEFAULT_CFG, overrides=None):
         """
         Initializes the BaseTrainer class.
-
         Args:
             cfg (str, optional): Path to a configuration file. Defaults to DEFAULT_CFG.
             overrides (dict, optional): Configuration overrides. Defaults to None.
@@ -87,6 +89,7 @@ class BaseTrainer:
         self.validator = None
         self.model = None
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
+
 
         # Dirs
         project = self.args.project or Path(SETTINGS['runs_dir']) / self.args.task

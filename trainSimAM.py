@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 
 # Load a model
-model = YOLO("voc_yolov8s_SimAM.yaml")  # build a new model from scratch
+model = YOLO("voc_yolov8s_SimAM2.yaml")  # build a new model from scratch
 # model = YOLO("yolov8s.pt")  # load a pretrained model (recommended for training)
 
 # Use the model

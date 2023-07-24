@@ -10,7 +10,7 @@ import torch.nn as nn
 from ultralytics.nn.modules import (C1, C2, C3, C3TR, SPP, SPPF, SPPFCSPC, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x,
                                     Classify,
                                     Concat, Conv, ConvTranspose, Detect, DWConv, DWConvTranspose2d, Ensemble, Focus,
-                                    GhostBottleneck, GhostConv, Segment, RFCAConv, CAConv, gnconv, HorBlock)
+                                    GhostBottleneck, GhostConv, Segment, RFCAConv, CAConv, gnconv, HorBlock, SimAM)
 from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, yaml_load
 from ultralytics.yolo.utils.checks import check_requirements, check_yaml
 from ultralytics.yolo.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights,
@@ -443,7 +443,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args.insert(2, n)  # number of repeats
                 n = 1
         # add module research
-        elif m in [SPPFCSPC, HorBlock]:
+        elif m in [SPPFCSPC, HorBlock,SimAM]:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
